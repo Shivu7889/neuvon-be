@@ -1,16 +1,53 @@
 const express = require('express');
-const cors = require('cors');
 const mysql = require('mysql2/promise');
+const cors = require('cors');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Create uploads directory if it doesn't exist
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log('✓ Uploads directory created');
+}
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadsDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'blog-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: function (req, file, cb) {
+    const allowedTypes = /jpeg|jpg|png|gif|webp/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed!'));
+    }
+  }
+});
+
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static(uploadsDir)); // Serve uploaded files
 
-// MySQL connection configuration
 const dbConfig = {
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'user',
@@ -48,14 +85,91 @@ async function createContactsTable() {
   }
 }
 
+// Create blogs table if it doesn't exist
+async function createBlogsTable() {
+  try {
+    const connection = await pool.getConnection();
+    
+    const createTableQuery = `
+      CREATE TABLE IF NOT EXISTS blogs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        slug VARCHAR(255) UNIQUE NOT NULL,
+        title VARCHAR(500) NOT NULL,
+        excerpt TEXT NOT NULL,
+        content LONGTEXT NOT NULL,
+        cover_image VARCHAR(500),
+        author_name VARCHAR(255) NOT NULL,
+        author_role VARCHAR(255) NOT NULL,
+        author_image VARCHAR(255),
+        category VARCHAR(100) NOT NULL,
+        tags JSON,
+        read_time VARCHAR(50) NOT NULL,
+        published_at DATE NOT NULL,
+        status ENUM('draft', 'published') DEFAULT 'draft',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_slug (slug),
+        INDEX idx_category (category),
+        INDEX idx_status (status),
+        INDEX idx_published_at (published_at)
+      )
+    `;
+    
+    await connection.execute(createTableQuery);
+    
+    // Add author_image column if it doesn't exist (for existing tables)
+    try {
+      const [authorImageColumns] = await connection.execute(`
+        SHOW COLUMNS FROM blogs LIKE 'author_image'
+      `);
+      
+      if (authorImageColumns.length === 0) {
+        await connection.execute(`
+          ALTER TABLE blogs 
+          ADD COLUMN author_image VARCHAR(255) AFTER author_role
+        `);
+        console.log('✓ Author_image column added successfully');
+      } else {
+        console.log('✓ Author_image column already exists');
+      }
+    } catch (alterError) {
+      console.error('Error checking/adding author_image column:', alterError.message);
+    }
+
+    // Add cover_image column if it doesn't exist (for existing tables)
+    try {
+      const [coverImageColumns] = await connection.execute(`
+        SHOW COLUMNS FROM blogs LIKE 'cover_image'
+      `);
+      
+      if (coverImageColumns.length === 0) {
+        await connection.execute(`
+          ALTER TABLE blogs 
+          ADD COLUMN cover_image VARCHAR(500) AFTER content
+        `);
+        console.log('✓ Cover_image column added successfully');
+      } else {
+        console.log('✓ Cover_image column already exists');
+      }
+    } catch (alterError) {
+      console.error('Error checking/adding cover_image column:', alterError.message);
+    }
+    
+    connection.release();
+    console.log('✓ Blogs table ready');
+  } catch (error) {
+    console.error('Error creating blogs table:', error);
+  }
+}
+
 // Initialize database
 createContactsTable();
+createBlogsTable();
 
 // API Routes
 app.post('/api/contact', async (req, res) => {
   try {
     const { name, email, message } = req.body;
-
     // Validate required fields
     if (!name || !email || !message) {
       return res.status(400).json({
@@ -130,6 +244,283 @@ app.get('/api/contacts', async (req, res) => {
   }
 });
 
+// ============ BLOG API ENDPOINTS ============
+
+// Upload blog cover image
+app.post('/api/upload-blog-image', upload.single('image'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No image file provided'
+      });
+    }
+
+    const imageUrl = `http://localhost:${PORT}/uploads/${req.file.filename}`;
+    
+    res.json({
+      success: true,
+      message: 'Image uploaded successfully',
+      data: {
+        filename: req.file.filename,
+        url: imageUrl,
+        path: `/uploads/${req.file.filename}`
+      }
+    });
+  } catch (error) {
+    console.error('Error uploading image:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to upload image'
+    });
+  }
+});
+
+// Get all published blogs
+app.get('/api/blogs', async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    
+    const selectQuery = `
+      SELECT id, slug, title, excerpt, cover_image, author_name, author_role, author_image,
+             category, tags, read_time, published_at, created_at
+      FROM blogs 
+      WHERE status = 'published'
+      ORDER BY published_at DESC
+    `;
+    const [rows] = await connection.execute(selectQuery);
+    connection.release();
+
+    // Parse JSON tags
+    const blogs = rows.map(blog => ({
+      ...blog,
+      tags: typeof blog.tags === 'string' ? JSON.parse(blog.tags) : blog.tags
+    }));
+
+    res.json({
+      success: true,
+      data: blogs
+    });
+
+  } catch (error) {
+    console.error('Error fetching blogs:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// Get single blog by slug
+app.get('/api/blogs/:slug', async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const connection = await pool.getConnection();
+    
+    const selectQuery = `
+      SELECT * FROM blogs 
+      WHERE slug = ? AND status = 'published'
+    `;
+    const [rows] = await connection.execute(selectQuery, [slug]);
+    connection.release();
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Blog post not found'
+      });
+    }
+
+    const blog = {
+      ...rows[0],
+      tags: typeof rows[0].tags === 'string' ? JSON.parse(rows[0].tags) : rows[0].tags
+    };
+
+    res.json({
+      success: true,
+      data: blog
+    });
+
+  } catch (error) {
+    console.error('Error fetching blog:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// Get all blogs (admin - includes drafts)
+app.get('/api/admin/blogs', async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    
+    const selectQuery = 'SELECT * FROM blogs ORDER BY created_at DESC';
+    const [rows] = await connection.execute(selectQuery);
+    connection.release();
+
+    const blogs = rows.map(blog => ({
+      ...blog,
+      tags: typeof blog.tags === 'string' ? JSON.parse(blog.tags) : blog.tags
+    }));
+
+    res.json({
+      success: true,
+      data: blogs
+    });
+
+  } catch (error) {
+    console.error('Error fetching blogs:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// Create new blog
+app.post('/api/admin/blogs', async (req, res) => {
+  try {
+    const { 
+      slug, title, excerpt, content, cover_image, author_name, author_role, author_image,
+      category, tags, read_time, published_at, status 
+    } = req.body;
+
+    // Validate required fields
+    if (!slug || !title || !excerpt || !content || !author_name || 
+        !author_role || !category || !read_time || !published_at) {
+      return res.status(400).json({
+        success: false,
+        message: 'All required fields must be provided'
+      });
+    }
+
+    const connection = await pool.getConnection();
+    
+    const insertQuery = `
+      INSERT INTO blogs (
+        slug, title, excerpt, content, cover_image, author_name, author_role, author_image,
+        category, tags, read_time, published_at, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+    
+    const tagsJson = JSON.stringify(tags || []);
+    const [result] = await connection.execute(insertQuery, [
+      slug, title, excerpt, content, cover_image || null, author_name, author_role, author_image || null,
+      category, tagsJson, read_time, published_at, status || 'draft'
+    ]);
+    connection.release();
+
+    console.log('New blog created:', { id: result.insertId, slug, title });
+
+    res.status(201).json({
+      success: true,
+      message: 'Blog created successfully',
+      data: {
+        id: result.insertId,
+        slug
+      }
+    });
+
+  } catch (error) {
+    console.error('Error creating blog:', error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(400).json({
+        success: false,
+        message: 'A blog with this slug already exists'
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// Update blog
+app.put('/api/admin/blogs/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { 
+      slug, title, excerpt, content, cover_image, author_name, author_role, author_image,
+      category, tags, read_time, published_at, status 
+    } = req.body;
+
+    const connection = await pool.getConnection();
+    
+    const updateQuery = `
+      UPDATE blogs SET
+        slug = ?, title = ?, excerpt = ?, content = ?, cover_image = ?,
+        author_name = ?, author_role = ?, author_image = ?, category = ?,
+        tags = ?, read_time = ?, published_at = ?, status = ?
+      WHERE id = ?
+    `;
+    
+    const tagsJson = JSON.stringify(tags || []);
+    const [result] = await connection.execute(updateQuery, [
+      slug, title, excerpt, content, cover_image || null, author_name, author_role, author_image || null,
+      category, tagsJson, read_time, published_at, status || 'draft', id
+    ]);
+    connection.release();
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Blog not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Blog updated successfully'
+    });
+
+  } catch (error) {
+    console.error('Error updating blog:', error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(400).json({
+        success: false,
+        message: 'A blog with this slug already exists'
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
+// Delete blog
+app.delete('/api/admin/blogs/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const connection = await pool.getConnection();
+    
+    const deleteQuery = 'DELETE FROM blogs WHERE id = ?';
+    const [result] = await connection.execute(deleteQuery, [id]);
+    connection.release();
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Blog not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Blog deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Error deleting blog:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({
@@ -143,10 +534,20 @@ app.get('/api/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'Contact Form API Server is running',
+    message: 'API Server is running',
     endpoints: {
-      'POST /api/contact': 'Submit contact form',
-      'GET /api/contacts': 'Get all contacts (admin)',
+      contact: {
+        'POST /api/contact': 'Submit contact form',
+        'GET /api/contacts': 'Get all contacts (admin)'
+      },
+      blog: {
+        'GET /api/blogs': 'Get all published blogs',
+        'GET /api/blogs/:slug': 'Get single blog by slug',
+        'GET /api/admin/blogs': 'Get all blogs including drafts (admin)',
+        'POST /api/admin/blogs': 'Create new blog (admin)',
+        'PUT /api/admin/blogs/:id': 'Update blog (admin)',
+        'DELETE /api/admin/blogs/:id': 'Delete blog (admin)'
+      },
       'GET /api/health': 'Health check'
     }
   });
