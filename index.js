@@ -52,24 +52,19 @@ const allowedOrigins = [
 // Middleware
 
 app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like curl or Postman)
     if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.some(allowedOrigin => 
-      origin === allowedOrigin || 
-      origin.startsWith(allowedOrigin.replace('https://', 'http://')) // Handle http->https redirects
-    )) {
+
+    if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-    
-    const msg = `The CORS policy for this site does not allow access from ${origin}`;
-    return callback(new Error(msg), false);
+
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  exposedHeaders: ['Content-Length', 'X-Foo', 'X-Bar'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
 app.options('*', cors());
@@ -601,3 +596,4 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+
