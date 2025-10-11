@@ -46,15 +46,32 @@ const upload = multer({
 const allowedOrigins = [
   'http://localhost:8080',
   'https://neuvonsoftware.com',
-  'https://www.neuvonsoftware.com'
+  'https://www.neuvonsoftware.com',
+  'https://neuvon-be.vercel.app'
 ];
 // Middleware
 
 app.use(cors({
-  origin: '*',
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.some(allowedOrigin => 
+      origin === allowedOrigin || 
+      origin.startsWith(allowedOrigin.replace('https://', 'http://')) // Handle http->https redirects
+    )) {
+      return callback(null, true);
+    }
+    
+    const msg = `The CORS policy for this site does not allow access from ${origin}`;
+    return callback(new Error(msg), false);
+  },
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Length', 'X-Foo', 'X-Bar'],
 }));
+
 app.options('*', cors());
 
 app.use(express.json());
@@ -584,4 +601,3 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
-
