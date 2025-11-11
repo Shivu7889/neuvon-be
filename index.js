@@ -65,8 +65,8 @@ app.use(cors({
 app.options('*', cors());
 
 app.use(express.json());
-app.use('/uploads', express.static(uploadsDir)); // Serve uploaded files
 
+// Database configuration
 const dbConfig = {
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'user',
