@@ -9,23 +9,8 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-  console.log('✓ Uploads directory created');
-}
-
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadsDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'blog-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
+// Configure multer for file uploads in memory for Vercel
+const storage = multer.memoryStorage(); // Store files in memory instead of disk
 
 const upload = multer({
   storage: storage,
@@ -38,10 +23,15 @@ const upload = multer({
     if (mimetype && extname) {
       return cb(null, true);
     } else {
-      cb(new Error('Only image files are allowed!'));
+      cb(new Error('Only image files are allowed (JPEG, JPG, PNG, GIF, WebP)!'));
     }
   }
 });
+
+// For Vercel, we'll use a temporary directory if we need to write files
+const os = require('os');
+const tmpDir = os.tmpdir();
+console.log('Using temporary directory for file operations:', tmpDir);
 
 const allowedOrigins = [
   'http://localhost:8080',
@@ -52,19 +42,24 @@ const allowedOrigins = [
 // Middleware
 
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (like curl or Postman)
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
-
-    if (allowedOrigins.includes(origin)) {
+    
+    if (allowedOrigins.some(allowedOrigin => 
+      origin === allowedOrigin || 
+      origin.startsWith(allowedOrigin.replace('https://', 'http://')) // Handle http->https redirects
+    )) {
       return callback(null, true);
     }
-
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+    
+    const msg = `The CORS policy for this site does not allow access from ${origin}`;
+    return callback(new Error(msg), false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Length', 'X-Foo', 'X-Bar'],
 }));
 
 app.options('*', cors());
@@ -271,31 +266,42 @@ app.get('/api/contacts', async (req, res) => {
 // ============ BLOG API ENDPOINTS ============
 
 // Upload blog cover image
-app.post('/api/upload-blog-image', upload.single('image'), (req, res) => {
+app.post('/api/upload-blog-image', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        message: 'No image file provided'
+        message: 'No file uploaded'
       });
     }
 
-    const imageUrl = `http://localhost:${PORT}/uploads/${req.file.filename}`;
+    // For Vercel, we'll use a cloud storage solution like AWS S3 or Cloudinary in production
+    // For now, we'll just return a success response with file details
+    // In a production environment, you should upload to a cloud storage service here
     
-    res.json({
+    // Example response (modify as needed for your frontend)
+    res.status(200).json({
       success: true,
-      message: 'Image uploaded successfully',
-      data: {
-        filename: req.file.filename,
-        url: imageUrl,
-        path: `/uploads/${req.file.filename}`
+      message: 'File uploaded successfully',
+      // Return the file buffer as base64 for the frontend to handle
+      // In production, you would return the URL of the uploaded file in cloud storage
+      file: {
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
+        // In a real app, you would upload to S3/Cloudinary and return the URL
+        // For now, we'll just send a placeholder
+        url: `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`,
+        // In production, replace the above with something like:
+        // url: `https://your-cloud-storage-bucket.s3.amazonaws.com/${Date.now()}-${req.file.originalname}`
       }
     });
   } catch (error) {
-    console.error('Error uploading image:', error);
+    console.error('Error uploading file:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to upload image'
+      message: 'Error uploading file',
+      error: error.message
     });
   }
 });
@@ -596,4 +602,3 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
-
